@@ -4,7 +4,7 @@ This repository intents to provide a clean version, ready to be forked, set up a
 
 ## Installation
 Fork this repository.\
-Fill in the database fields on lines 12-15 and 55-58.\
+Fill in the database fields on lines 13-16 and 61-64.\
 Update your forked repository.\
 Create a Heroku app.\
 Link your forked repository.
