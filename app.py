@@ -5,6 +5,7 @@ import time
 app = Flask(__name__)
 
 
+# decorator for connecting DB
 def db_connector(f):
     def wrapper():
         try:
@@ -15,10 +16,15 @@ def db_connector(f):
                 password="")
             cur = mydb.cursor()
             returnal_val = f(cur)
+        except mysql.connector.Error as e:
+            print(e)
+            print("Error Code:", e.errno)
+            print("Message", e.msg)
         finally:
-            mydb.commit()
-            cur.close()
-            mydb.close()
+            if mydb:
+                mydb.commit()
+                cur.close()
+                mydb.close()
 
         return returnal_val
 
@@ -94,6 +100,8 @@ def vote():
         return Response(data, mimetype='text/xml')
 
 
+# aux function to split timestamps
+# for example, will transform ['2204', '930'] to ['22', '04', '09', '30']
 def datetime_parse(timestamps):
     res = []
     for timestamp in timestamps:
@@ -111,48 +119,43 @@ def datetime_parse(timestamps):
 
 @app.route('/new_poll', methods=['GET', 'POST'])
 @db_connector
+# insert new poll to the DB
 def new_poll(cur):
+    # retrieve poll parameters from GET request
     params = request.args
-
-    # deal with time zones
     start_date = params.get("start_date")
     start_time = params.get("start_time")
     end_date = params.get("end_date")
     end_time = params.get("end_time")
-    radio_id = params.get("radioID")
+    radio_id = params.get("radioID")  # identification radio code
 
+    # form timestamp for the DB
     parse = datetime_parse([start_date, start_time, end_date, end_time])
-    sd = f"{parse[1]}-{parse[0]}"
-    st = f"{parse[2]}:{parse[3]}"
-    ed = f"{parse[5]}-{parse[4]}"
-    et = f"{parse[6]}:{parse[7]}"
+    start = f"{parse[1]}-{parse[0]} {parse[2]}:{parse[3]}"
+    end = f"{parse[5]}-{parse[4]} {parse[6]}:{parse[7]}"
     if parse[1] == '12' and parse[5] == '01':
-        sy = time.strftime('%Y', time.gmtime())
-        ey = time.strftime(f'{sy.tm_year + 1}', '%Y')
+        start_y = time.strftime('%Y', time.gmtime())
+        end_y = time.strftime(f'{sy.tm_year + 1}', '%Y')
     else:
-        sy = time.strftime('%Y', time.gmtime())
-        ey = time.strftime('%Y', time.gmtime())
+        start_y = time.strftime('%Y', time.gmtime())
+        end_y = time.strftime('%Y', time.gmtime())
 
-    name_query = f"IF (Select Id from Poll where RadioStation = {radio_id} " \
-                 f"AND Name = (SELECT COUNT(DISTINCT(Id)) + 1 FROM Poll WHERE RadioStation = {radio_id})) is NULL " \
-                 f"THEN SELECT COUNT(DISTINCT(Id)) + 1 FROM Poll WHERE RadioStation = {radio_id}; " \
-                 f"ELSE SELECT MAX(Name) + 1 FROM Poll WHERE RadioStation = {radio_id} AND Name REGEXP('^[0-9]+$'); " \
-                 f"END IF;"
-
+    # querying last numeric poll name in DB, adding 1 to name a new poll
+    name_query = f"SELECT CONVERT(IFNULL(" \
+                 f"(SELECT MAX(Name) + 1 FROM Poll WHERE RadioStation = {radio_id} AND Name REGEXP('^[0-9]+$')) ," \
+                 f"1), char);"
     print(f"Going to execute query: {name_query}")
-
     cur.execute(name_query)
-
     poll_name = cur.fetchall()[0][0]
 
+    # inserting new poll to DB
     query = f"INSERT INTO Poll(Name,StartDate,EndDate,RadioStation) " \
             f"VALUES('{poll_name}'," \
-            f"'{sy}-{sd} {st}:00','{ey}-{ed} {et}:00',{radio_id});"
-
+            f"'{start_y}-{start}:00','{end_y}-{end}:00',{radio_id});"
     print(f"Going to execute query: {query}")
-
     cur.execute(query)
 
+    # return name of the created poll
     data = f"""<?xml version="1.0"?>
              <polldata><name>{poll_name}</name></polldata>"""
     if params:
@@ -163,25 +166,31 @@ def new_poll(cur):
 
 @app.route('/get_count', methods=['GET', 'POST'])
 @db_connector
+# retrieve from DB results for the last conducted poll
 def get_count(cur):
+    # getting radio code parameter from GET request
     params = request.args
     radio_id = params.get("radioID")
 
+    # querying DB for the last results for radio with this code
     query = f"""SELECT Name, `Number`, `Count` 
                 FROM Results WHERE `Radio Id` = {radio_id} 
-                AND StartDate < '{time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())}' 
+                AND StartDate < 
+                '{time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())}' 
                 ORDER by EndDate DESC LIMIT 2;"""
-
     print(f"Going to execute query: {query}")
-
     cur.execute(query)
 
     try:
         res = cur.fetchall()
-        poll_name, c1, n1, c2, n2 = res[0][0], res[0][2], res[0][1], res[1][2], res[1][1]
+        # assign name, counts and phone numbers if the result is not empty
+        poll_name, c1, n1, c2, n2 = \
+            res[0][0], res[0][2], res[0][1], res[1][2], res[1][1]
     except:
+        # assign poll name as -1 if there were not conducted polls
         poll_name, c1, n1, c2, n2 = -1, 0, 0, 0, 0
 
+    # return name and counts for the last conducted poll
     data = f"""<?xml version="1.0"?>
          <countdata><name>{poll_name}</name>
          <count1>{c1}</count1>
@@ -196,24 +205,31 @@ def get_count(cur):
 
 @app.route('/get_code', methods=['GET', 'POST'])
 @db_connector
+# check identification code of the radio
 def get_code(cur):
+    # getting radio code parameter from GET request
     params = request.args
     code = params.get("authCode")
 
+    # querying DB for the transmitted radio code
     query = f"SELECT Id FROM RadioStation WHERE Code={code};"
-
     print(f"Going to execute query: {query}")
-
     cur.execute(query)
 
     try:
         res = cur.fetchall()
+        # assign radio id, if the result is not empty
         radio_id = res[0][0]
     except:
         res = True
+        # assign radio id as -1 if there is no such radio code
         radio_id = -1
 
-    data = f"""<?xml version="1.0"?><authdata><radioStation>{radio_id}</radioStation></authdata>"""
+    # return checking results
+    data = f"""<?xml version="1.0"?>
+               <authdata>
+               <radioStation>{radio_id}</radioStation>
+               </authdata>"""
 
     if res:
         return Response(data, mimetype='text/xml')
@@ -223,51 +239,69 @@ def get_code(cur):
 
 @app.route('/check_datetime', methods=['GET', 'POST'])
 @db_connector
+# check the correctness of dates and times for the poll
 def check_datetime(cur):
+    # getting parameters from GET request
     params = request.args
     start_date = params.get("start_date")
     start_time = params.get("start_time")
     end_date = params.get("end_date")
     end_time = params.get("end_time")
     radio_id = params.get("radioID")
-    poll_name = 'tempName'
+
+    # assigning default values for variables
+    poll_name = ''
     start_date_status = 'OK'
     start_time_status = 'OK'
     end_date_status = 'OK'
     end_time_status = 'OK'
 
+    # checking only start time
     if not start_time and not end_date and not end_time:
+        # split day and month
         parse = datetime_parse([start_date])
         day = parse[0]
         month = parse[1]
         year = time.strftime('%Y', time.gmtime())
+
+        # check if this date is exist, exclude input like '3002' or '5201'
         try:
             s_date = time.strptime(f"{day} {month} {year}", "%d %m %Y")
         except ValueError:
             start_date_status = 'WrongFormat'
+
+        # check that start date is not in the past
         if start_date_status == 'OK':
             date = time.gmtime()
-            cur_date = time.strptime(f"{date.tm_mday} {date.tm_mon} {date.tm_year}", "%d %m %Y")
+            cur_date = \
+                time.strptime(f"{date.tm_mday} {date.tm_mon} {date.tm_year}",
+                              "%d %m %Y")
             if s_date < cur_date:
                 start_date_status = 'PastStart'
+
+        # check that there is no polls that already took that all day
         if start_date_status == 'OK':
             try:
-                next = time.strptime(f"{s_date.tm_mday + 1} {month} {year}", "%d %m %Y")
+                next = time.strptime(f"{s_date.tm_mday + 1} {month} {year}",
+                                     "%d %m %Y")
             except ValueError:
                 try:
-                    next = time.strptime(f"1 {s_date.tm_mon + 1} {year}", "%d %m %Y")
+                    next = time.strptime(f"1 {s_date.tm_mon + 1} {year}",
+                                         "%d %m %Y")
                 except ValueError:
-                    next = time.strptime(f"1 1 {s_date.tm_year + 1}", "%d %m %Y")
-            n_mon = '0' + str(next.tm_mon) if len(str(next.tm_mon)) == 1 else str(next.tm_mon)
-            n_day = '0' + str(next.tm_mday) if len(str(next.tm_mday)) == 1 else str(next.tm_mday)
+                    next = time.strptime(f"1 1 {s_date.tm_year + 1}",
+                                         "%d %m %Y")
+            n_mon = '0' + str(next.tm_mon) if len(str(next.tm_mon)) == 1\
+                else str(next.tm_mon)
+            n_day = '0' + str(next.tm_mday) if len(str(next.tm_mday)) == 1\
+                else str(next.tm_mday)
 
             query = f"""SELECT Name FROM Poll 
                         WHERE RadioStation = {radio_id} 
                         AND StartDate <= '{year}-{month}-{day} 00:00:00' 
-                        AND EndDate >= '{next.tm_year}-{n_mon}-{n_day} 00:00:00';"""
-
+                        AND EndDate >= 
+                        '{next.tm_year}-{n_mon}-{n_day} 00:00:00';"""
             print(f"Going to execute query: {query}")
-
             cur.execute(query)
 
             try:
@@ -276,27 +310,36 @@ def check_datetime(cur):
                 start_date_status = 'DateTaken'
             except:
                 pass
+
+    # checking start date and start time
     elif start_time and not end_date and not end_time:
+        # split day, month, hours, minutes
         parse = datetime_parse([start_date, start_time])
-        day = parse[0]
-        month = parse[1]
-        hour = parse[2]
-        min = parse[3]
+        day, month, hour, min = parse[0], parse[1], parse[2], parse[3]
         year = time.strftime('%Y', time.gmtime())
-        s_date = time.strptime(f"{day} {month} {year} {hour}:{min}", "%d %m %Y %H:%M")
+
+        # form timestamp for the start date and time
+        s_date = time.strptime(f"{day} {month} {year} {hour}:{min}",
+                               "%d %m %Y %H:%M")
+
+        # form current timestamp
         date = time.gmtime()
         cur_date = \
-            time.strptime(f"{date.tm_mday} {date.tm_mon} {date.tm_year} {date.tm_hour}:{date.tm_min}",
+            time.strptime(f"{date.tm_mday} {date.tm_mon} {date.tm_year} "
+                          f"{date.tm_hour}:{date.tm_min}",
                           "%d %m %Y %H:%M")
+
+        # check that start date and time are not in the past
         if s_date < cur_date:
             start_time_status = 'PastStart'
+
+        # check that poll is not going to start during the other poll
         if start_time_status == 'OK':
             query = f"""SELECT Name FROM Poll 
                         WHERE RadioStation = {radio_id} 
-                        AND '{year}-{month}-{day} {hour}:{min}:00' BETWEEN StartDate AND EndDate;"""
-
+                        AND '{year}-{month}-{day} {hour}:{min}:00' 
+                        BETWEEN StartDate AND EndDate;"""
             print(f"Going to execute query: {query}")
-
             cur.execute(query)
 
             try:
@@ -305,13 +348,15 @@ def check_datetime(cur):
                 start_time_status = 'DatetimeTaken'
             except:
                 pass
+
+    # checking start date, start time and end date
     elif start_time and end_date and not end_time:
+        # split days, months
         parse = datetime_parse([start_date, end_date])
         s_day = parse[0]
         s_month = parse[1]
         day = parse[2]
         month = parse[3]
-
         if s_month == '12' and month == '01':
             s_year = time.strftime('%Y', time.gmtime())
             year = time.strftime(f'{s_year.tm_year + 1}', '%Y')
@@ -319,18 +364,26 @@ def check_datetime(cur):
             s_year = time.strftime('%Y', time.gmtime())
             year = time.strftime('%Y', time.gmtime())
 
+        # check if this date is exist, exclude input like '3002' or '5201'
         try:
             e_date = time.strptime(f"{day} {month} {year}", "%d %m %Y")
         except ValueError:
             end_date_status = 'WrongFormat'
 
+        # check that end date is not earlier than start date
         if end_date_status == 'OK' \
-                and e_date < time.strptime(f"{s_day} {s_month} {s_year}", "%d %m %Y"):
+                and e_date < time.strptime(f"{s_day} {s_month} {s_year}",
+                                           "%d %m %Y"):
             end_date_status = 'EndBeforeStart'
+
+    # checking start date, start time, end date and end time
     else:
+        # split days, months, hours, minutes
         parse = datetime_parse([start_date, start_time, end_date, end_time])
-        s_day, s_month, s_hour, s_min = parse[0], parse[1], parse[2], parse[3]
-        day, month, hour, min = parse[4], parse[5], parse[6], parse[7]
+        s_day, s_month, s_hour, s_min = \
+            parse[0], parse[1], parse[2], parse[3]
+        day, month, hour, min = \
+            parse[4], parse[5], parse[6], parse[7]
         if s_month == '12' and month == '01':
             s_year = time.strftime('%Y', time.gmtime())
             year = time.strftime(f'{s_year.tm_year + 1}', '%Y')
@@ -338,20 +391,27 @@ def check_datetime(cur):
             s_year = time.strftime('%Y', time.gmtime())
             year = time.strftime('%Y', time.gmtime())
 
-        if time.strptime(f"{day} {month} {year} {hour}:{min}", "%d %m %Y %H:%M") \
-                < time.strptime(f"{s_day} {s_month} {s_year} {s_hour}:{s_min}", "%d %m %Y %H:%M"):
+        # check that end date and time are not before star date and time
+        if time.strptime(f"{day} {month} {year} {hour}:{min}",
+                         "%d %m %Y %H:%M") \
+                <= time.strptime(f"{s_day} {s_month} {s_year} "
+                                 f"{s_hour}:{s_min}", "%d %m %Y %H:%M"):
             end_time_status = 'EndBeforeStart'
 
+        # check that there are no conflict with other polls
         if end_time_status == 'OK':
             query = f"""SELECT Name FROM Poll
                         WHERE RadioStation = {radio_id}
-                        AND (('{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00' BETWEEN StartDate AND EndDate)
-                        OR ('{year}-{month}-{day} {hour}:{min}:00' BETWEEN StartDate AND EndDate)
-                        OR ((StartDate BETWEEN '{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00' 
+                        AND (('{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00' 
+                        BETWEEN StartDate AND EndDate)
+                        OR ('{year}-{month}-{day} {hour}:{min}:00' 
+                        BETWEEN StartDate AND EndDate)
+                        OR ((StartDate BETWEEN 
+                        '{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00' 
                         AND '{year}-{month}-{day} {hour}:{min}:00') 
-                        AND (EndDate BETWEEN '{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00'
+                        AND (EndDate BETWEEN 
+                        '{s_year}-{s_month}-{s_day} {s_hour}:{s_min}:00'
                         AND '{year}-{month}-{day} {hour}:{min}:00')));"""
-
             print(f"Going to execute query: {query}")
             cur.execute(query)
 
@@ -362,6 +422,7 @@ def check_datetime(cur):
             except:
                 pass
 
+    # return checking results
     data = f"""<?xml version="1.0"?>
              <polldata><name>{poll_name}</name>
              <startDate>{start_date_status}</startDate>
