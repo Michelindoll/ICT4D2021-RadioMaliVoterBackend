@@ -418,7 +418,7 @@ def check_datetime(cur):
             try:
                 res = cur.fetchall()
                 poll_name = res[0][0]
-                start_time_status = 'DatetimeTaken'
+                end_time_status = 'DatetimeTaken'
             except:
                 pass
 
